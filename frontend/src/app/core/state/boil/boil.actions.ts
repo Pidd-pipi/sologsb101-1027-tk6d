@@ -13,6 +13,12 @@ export const BoilActions = createActionGroup({
     'Reset Filter': emptyProps(),
     'Create Boil Add': props<{ payload: Omit<BoilAdd, 'id'> }>(),
     'Update Boil Add': props<{ id: string; patch: Partial<BoilAdd> }>(),
-    'Delete Boil Add': props<{ id: string }>()
+    'Delete Boil Add': props<{ id: string }>(),
+    /** 待指认投花认到酒花主档 */
+    'Resolve Boil Hop': props<{ addId: string; hopId: string }>(),
+    /** 待指认项确认为非酒花辅料 */
+    'Mark Boil Non Hop': props<{ addId: string }>(),
+    /** 重算一条/多条投花的苦度快照（用户确认） */
+    'Recompute Ibu': props<{ addIds?: string[] }>()
   }
 });

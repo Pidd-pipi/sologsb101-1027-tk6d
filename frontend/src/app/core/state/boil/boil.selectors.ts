@@ -1,5 +1,6 @@
 /** 煮沸投加 feature selectors */
 import { createFeatureSelector, createSelector } from '@ngrx/store';
+import { isUnresolvedBoilAdd } from '../../models/boil-add.model';
 import { BoilState } from './boil.reducer';
 
 export const selectBoilState = createFeatureSelector<BoilState>('boil');
@@ -29,3 +30,23 @@ export const selectNextBoilAddByRecipe = (recipeId: string) =>
     const own = adds.filter((item) => item.recipeId === recipeId).sort((a, b) => b.atMin - a.atMin);
     return own.find((item) => item.atMin > 0) ?? null;
   });
+
+/** 待人工指认酒花主档的投花（认不出名字、又不是非酒花辅料），可按配方过滤 */
+export const selectUnresolvedBoilAdds = (recipeId?: string) =>
+  createSelector(selectAllBoilAdds, (adds) =>
+    adds
+      .filter((add) => (recipeId ? add.recipeId === recipeId : true))
+      .filter((add) => isUnresolvedBoilAdd(add))
+      .sort((a, b) => b.atMin - a.atMin)
+  );
+
+/** 全局待指认条数（页头徽标用） */
+export const selectUnresolvedBoilCount = createSelector(selectAllBoilAdds, (adds) =>
+  adds.reduce((sum, add) => sum + (isUnresolvedBoilAdd(add) ? 1 : 0), 0)
+);
+
+/** 苦度快照已作废待重算的投加 id 集合 */
+export const selectStaleIbuAddIds = createSelector(
+  selectAllBoilAdds,
+  (adds) => new Set(adds.filter((add) => add.ibuStale).map((add) => add.id))
+);

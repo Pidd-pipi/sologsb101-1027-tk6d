@@ -1,12 +1,11 @@
 /** 辅料库 feature selectors */
 import { createFeatureSelector, createSelector } from '@ngrx/store';
-import { weightedEbc } from '../../utils/brew';
-import { IngredientsState } from './ingredients.reducer';
-
-export const selectIngredientsState = createFeatureSelector<IngredientsState>('ingredients');
+import type { BoilAddRow } from '../../utils/db';
+import { IngredientsState } from './ingredients.reducer';export const selectIngredientsState = createFeatureSelector<IngredientsState>('ingredients');
 
 export const selectAllMalts = createSelector(selectIngredientsState, (state) => state.malts);
 export const selectAllHops = createSelector(selectIngredientsState, (state) => state.hops);
+export const selectAllRecipeMalts = createSelector(selectIngredientsState, (state) => state.recipeMalts);
 export const selectIngredientsFilter = createSelector(selectIngredientsState, (state) => state.filter);
 
 export const selectFilteredMalts = createSelector(selectAllMalts, selectIngredientsFilter, (malts, filter) => {
@@ -35,12 +34,16 @@ export const selectFilteredHops = createSelector(selectAllHops, selectIngredient
   });
 });
 
-/** 指定配方的加权平均色度 */
-export const selectEbcByRecipe = (recipeId: string) =>
-  createSelector(selectAllMalts, (malts) => weightedEbc(malts.filter((item) => item.recipeId === recipeId)));
+/** 指定配方的麦芽投料行 */
+export const selectRecipeMaltsByRecipe = (recipeId: string) =>
+  createSelector(selectAllRecipeMalts, (refs) => refs.filter((item) => item.recipeId === recipeId));
 
-/** 指定配方的酒花投放量合计 */
-export const selectHopAmountByRecipe = (recipeId: string) =>
-  createSelector(selectAllHops, (hops) =>
-    hops.filter((item) => item.recipeId === recipeId).reduce((sum, item) => sum + item.amountG, 0)
-  );
+/** 色度缓存已作废待重算的配方 id 集合（任一投料主档色度改过） */
+export const selectStaleEbcRecipeIds = createSelector(
+  selectAllRecipeMalts,
+  (refs) => new Set(refs.filter((item) => item.ebcStale).map((item) => item.recipeId))
+);
+
+/** 被煮沸投花引用的酒花主档 id 集合（由煮沸页数据聚合，供辅料库删除拦截预检） */
+export const selectReferencedHopIds = (adds: BoilAddRow[]) =>
+  new Set(adds.filter((add) => add.hopId !== null).map((add) => add.hopId as string));

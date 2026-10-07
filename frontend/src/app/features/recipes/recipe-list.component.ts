@@ -19,16 +19,19 @@ import { BEER_STYLES, createEmptyRecipe, type Recipe } from '../../core/models/r
 import { filtersToQueryParams, queryParamsToFilters, type FilterModel, type FilterSelectConfig } from '../../core/models/filter.model';
 import { RecipeActions } from '../../core/state/recipe/recipe.actions';
 import {
+  selectAllRecipes,
   selectFilteredRecipes,
   selectRecipeError,
   selectRecipeFilter,
   selectRecipeLoading,
   selectSelectedRecipe
 } from '../../core/state/recipe/recipe.selectors';
-import { selectAllMalts } from '../../core/state/ingredients/ingredients.selectors';
+import { selectAllRecipeMalts } from '../../core/state/ingredients/ingredients.selectors';
 import { selectAllFerments } from '../../core/state/ferment/ferment.selectors';
 import { selectAllPackagings } from '../../core/state/packaging/packaging.selectors';
-import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from '../../core/utils/brew';
+import { IngredientsActions } from '../../core/state/ingredients/ingredients.actions';
+import { abvFromGravity, apparentAttenuation, totalGrainKg } from '../../core/utils/brew';
+import { ebcDeltaOf } from '../../core/utils/derived';
 
 @Component({
   selector: 'app-recipe-list',
@@ -68,6 +71,18 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
         <app-stat-badge label="平均目标 OG" [value]="avgTargetOg()" tone="info" icon="water_drop" />
         <app-stat-badge label="已罐装配方" [value]="packagedRecipeCount()" suffix="个" tone="success" icon="inventory_2" />
       </div>
+
+      @if (staleRecipes().length > 0) {
+        <mat-card appearance="outlined" class="stale-banner">
+          <mat-card-content>
+            <strong>有 {{ staleRecipes().length }} 个配方的色度偏差已作废待重算：</strong>
+            @for (recipe of staleRecipes(); track recipe.id) {
+              <span class="stale-chip">{{ recipe.name }}</span>
+            }
+            <button mat-flat-button color="warn" type="button" (click)="recomputeAllEbc()">全部重算</button>
+          </mat-card-content>
+        </mat-card>
+      }
 
       <app-filter-bar
         [filters]="filter()"
@@ -124,8 +139,16 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
                     </tr>
                     <tr>
                       <th>色度偏差</th>
-                      <td [style.color]="ebcDelta(recipe) < 0 ? '#c0392b' : '#1e8449'">
-                        {{ ebcDelta(recipe) > 0 ? '+' : '' }}{{ ebcDelta(recipe) }} EBC
+                      <td>
+                        @if (recipe.ebcStale) {
+                          <span class="stale-tag">待重算</span>
+                          <span class="muted">缓存 {{ formatSigned(ebcDelta(recipe)) }} EBC 已作废</span>
+                          <button mat-button color="warn" type="button" (click)="recomputeEbc(recipe)">重算</button>
+                        } @else {
+                          <span [style.color]="ebcDelta(recipe) < 0 ? '#c0392b' : '#1e8449'">
+                            {{ formatSigned(ebcDelta(recipe)) }} EBC
+                          </span>
+                        }
                       </td>
                     </tr>
                     <tr>
@@ -193,7 +216,34 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
         </mat-card>
       }
     </div>
-  `
+  `,
+  styles: [
+    `
+      .stale-banner {
+        margin: 4px 0 12px;
+        border-color: #e6b0aa;
+        background: #fdecea;
+      }
+      .stale-chip {
+        display: inline-block;
+        margin: 0 6px;
+        padding: 2px 10px;
+        border-radius: 999px;
+        background: #c0392b;
+        color: #fff;
+        font-size: 12px;
+      }
+      .stale-tag {
+        background: #fdecea;
+        color: #c0392b;
+        border: 1px solid #e6b0aa;
+        border-radius: 999px;
+        padding: 1px 8px;
+        font-size: 11px;
+        margin-right: 6px;
+      }
+    `
+  ]
 })
 export class RecipeListComponent implements OnInit {
   private readonly store = inject(Store);
@@ -203,12 +253,13 @@ export class RecipeListComponent implements OnInit {
 
   readonly beerStyles = BEER_STYLES;
   readonly recipes = this.store.selectSignal(selectFilteredRecipes);
+  private readonly allRecipes = this.store.selectSignal(selectAllRecipes);
   readonly filter = this.store.selectSignal(selectRecipeFilter);
   readonly selected = this.store.selectSignal(selectSelectedRecipe);
   readonly loading = this.store.selectSignal(selectRecipeLoading);
   readonly error = this.store.selectSignal(selectRecipeError);
 
-  private readonly allMalts = this.store.selectSignal(selectAllMalts);
+  private readonly allRecipeMalts = this.store.selectSignal(selectAllRecipeMalts);
   private readonly allFerments = this.store.selectSignal(selectAllFerments);
   private readonly allPackagings = this.store.selectSignal(selectAllPackagings);
 
@@ -233,6 +284,9 @@ export class RecipeListComponent implements OnInit {
   readonly packagedRecipeCount = computed(
     () => new Set(this.allPackagings().map((item) => item.recipeId)).size
   );
+
+  /** 色度缓存已作废待重算的配方（按全量统计，不受筛选影响） */
+  readonly staleRecipes = computed(() => this.allRecipes().filter((item) => item.ebcStale));
 
   ngOnInit(): void {
     this.store.dispatch(RecipeActions.reloadAll());
@@ -272,17 +326,30 @@ export class RecipeListComponent implements OnInit {
   }
 
   maltCount(recipeId: string): number {
-    return this.allMalts().filter((item) => item.recipeId === recipeId).length;
+    return this.allRecipeMalts().filter((item) => item.recipeId === recipeId).length;
   }
 
   grainKg(recipe: Recipe): number {
     return totalGrainKg(recipe.batchSizeL, recipe.targetOg);
   }
 
+  /** 色度偏差读配方缓存快照（主档色度改动后缓存先作废，重算前不作数） */
   ebcDelta(recipe: Recipe): number {
-    const malts = this.allMalts().filter((item) => item.recipeId === recipe.id);
-    if (malts.length === 0) return 0;
-    return ebcDeviation(malts, recipe.targetEbc);
+    return ebcDeltaOf(recipe);
+  }
+
+  formatSigned(value: number): string {
+    return `${value > 0 ? '+' : ''}${value}`;
+  }
+
+  recomputeEbc(recipe: Recipe): void {
+    this.store.dispatch(IngredientsActions.recomputeEbc({ recipeIds: [recipe.id] }));
+    this.snack.open(`已按最新主档色度重算「${recipe.name}」`, '关闭', { duration: 2200 });
+  }
+
+  recomputeAllEbc(): void {
+    this.store.dispatch(IngredientsActions.recomputeEbc({ recipeIds: this.staleRecipes().map((item) => item.id) }));
+    this.snack.open('已按最新主档色度重算全部待重算配方', '关闭', { duration: 2500 });
   }
 
   select(id: string): void {
@@ -304,7 +371,9 @@ export class RecipeListComponent implements OnInit {
       targetFg: recipe.targetFg,
       targetIbu: recipe.targetIbu,
       targetEbc: recipe.targetEbc,
-      batchSizeL: recipe.batchSizeL
+      batchSizeL: recipe.batchSizeL,
+      ebcSnapshot: recipe.ebcSnapshot,
+      ebcStale: recipe.ebcStale
     };
     this.formVisible = true;
   }
@@ -314,8 +383,10 @@ export class RecipeListComponent implements OnInit {
       this.snack.open('请填写配方名称', '关闭', { duration: 2500 });
       return;
     }
+    // 色度快照由主档投料重算得出，不随表单提交
+    const { ebcSnapshot: _s, ebcStale: _t, ...targets } = this.form;
     if (this.editingId) {
-      this.store.dispatch(RecipeActions.updateRecipe({ id: this.editingId, patch: { ...this.form } }));
+      this.store.dispatch(RecipeActions.updateRecipe({ id: this.editingId, patch: targets }));
     } else {
       this.store.dispatch(RecipeActions.createRecipe({ payload: { ...this.form } }));
     }

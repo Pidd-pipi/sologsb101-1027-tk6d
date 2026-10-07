@@ -6,7 +6,7 @@ import { Injectable, inject } from '@angular/core';
 import { Actions, createEffect, ofType } from '@ngrx/effects';
 import type { Action } from '@ngrx/store';
 import { catchError, exhaustMap, forkJoin, from, map, of, switchMap } from 'rxjs';
-import { RecipeService } from '../../services/recipe.service';
+import { IngredientInUseError, RecipeService } from '../../services/recipe.service';
 import { IngredientsActions } from '../ingredients/ingredients.actions';
 import { MashActions } from '../mash/mash.actions';
 import { BoilActions } from '../boil/boil.actions';
@@ -26,12 +26,17 @@ export class RecipeEffects {
           recipes: from(this.service.listRecipes()),
           malts: from(this.service.listMalts()),
           hops: from(this.service.listHops()),
+          recipeMalts: from(this.service.listRecipeMalts()),
           mashSteps: from(this.service.listMashSteps()),
           boilAdds: from(this.service.listBoilAdds())
         }).pipe(
           switchMap((data) => [
             RecipeActions.loadRecipesSuccess({ recipes: data.recipes }),
-            IngredientsActions.loadIngredientsSuccess({ malts: data.malts, hops: data.hops }),
+            IngredientsActions.loadIngredientsSuccess({
+              malts: data.malts,
+              hops: data.hops,
+              recipeMalts: data.recipeMalts
+            }),
             MashActions.loadMashStepsSuccess({ steps: data.mashSteps }),
             BoilActions.loadBoilAddsSuccess({ adds: data.boilAdds })
           ]),
@@ -68,7 +73,7 @@ export class RecipeEffects {
     )
   );
 
-  /** 麦芽 / 酒花 / 糖化步 / 煮沸投加的增删改 */
+  /** 主档 / 投料 / 投花的增删改与重算 */
   ingredientMutation$ = createEffect(() =>
     this.actions$.pipe(
       ofType(
@@ -78,20 +83,34 @@ export class RecipeEffects {
         IngredientsActions.createHop,
         IngredientsActions.updateHop,
         IngredientsActions.deleteHop,
+        IngredientsActions.createRecipeMalt,
+        IngredientsActions.updateRecipeMalt,
+        IngredientsActions.deleteRecipeMalt,
+        IngredientsActions.recomputeEbc,
         MashActions.createMashStep,
         MashActions.updateMashStep,
         MashActions.deleteMashStep,
         MashActions.reorderMashSteps,
         BoilActions.createBoilAdd,
         BoilActions.updateBoilAdd,
-        BoilActions.deleteBoilAdd
+        BoilActions.deleteBoilAdd,
+        BoilActions.resolveBoilHop,
+        BoilActions.markBoilNonHop,
+        BoilActions.recomputeIbu
       ),
       exhaustMap((action) =>
         from(this.persistIngredient(action)).pipe(
           map(() => RecipeActions.reloadAll()),
-          catchError((error: unknown) =>
-            of(RecipeActions.loadFailure({ error: error instanceof Error ? error.message : '保存失败' }))
-          )
+          catchError((error: unknown) => {
+            // 删除被引用的主档：给出明确拦截提示，不清空已有错误展示
+            const message =
+              error instanceof IngredientInUseError
+                ? error.message
+                : error instanceof Error
+                  ? error.message
+                  : '保存失败';
+            return of(RecipeActions.loadFailure({ error: message }));
+          })
         )
       )
     )
@@ -112,6 +131,14 @@ export class RecipeEffects {
         return this.service.updateHop(payload['id'] as string, payload['patch'] as never);
       case IngredientsActions.deleteHop.type:
         return this.service.deleteHop(payload['id'] as string);
+      case IngredientsActions.createRecipeMalt.type:
+        return this.service.createRecipeMalt(payload['payload'] as never);
+      case IngredientsActions.updateRecipeMalt.type:
+        return this.service.updateRecipeMalt(payload['id'] as string, payload['patch'] as never);
+      case IngredientsActions.deleteRecipeMalt.type:
+        return this.service.deleteRecipeMalt(payload['id'] as string);
+      case IngredientsActions.recomputeEbc.type:
+        return this.service.recomputeRecipeEbc(payload['recipeIds'] as string[] | undefined);
       case MashActions.createMashStep.type:
         return this.service.createMashStep(payload['payload'] as never);
       case MashActions.updateMashStep.type:
@@ -124,8 +151,16 @@ export class RecipeEffects {
         return this.service.createBoilAdd(payload['payload'] as never);
       case BoilActions.updateBoilAdd.type:
         return this.service.updateBoilAdd(payload['id'] as string, payload['patch'] as never);
-      default:
+      case BoilActions.deleteBoilAdd.type:
         return this.service.deleteBoilAdd(payload['id'] as string);
+      case BoilActions.resolveBoilHop.type:
+        return this.service.resolveBoilAddHop(payload['addId'] as string, payload['hopId'] as string);
+      case BoilActions.markBoilNonHop.type:
+        return this.service.markBoilAddNonHop(payload['addId'] as string);
+      case BoilActions.recomputeIbu.type:
+        return this.service.recomputeBoilAddIbu(payload['addIds'] as string[] | undefined);
+      default:
+        return Promise.resolve();
     }
   }
 }

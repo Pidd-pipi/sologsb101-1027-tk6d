@@ -5,12 +5,14 @@
 import type { Recipe } from '../models/recipe.model';
 import type { Malt } from '../models/malt.model';
 import type { Hop } from '../models/hop.model';
+import type { RecipeMalt } from '../models/recipe-malt.model';
 import type { MashStep } from '../models/mash-step.model';
 import type { BoilAdd } from '../models/boil-add.model';
 import type { Ferment } from '../models/ferment.model';
 import type { Packaging } from '../models/packaging.model';
 import { DB_NAME, DB_SCHEMA_VERSION, db } from './db';
-import { abvFromGravity, apparentAttenuation, totalGrainKg, weightedEbc } from './brew';
+import { abvFromGravity, apparentAttenuation, totalGrainKg } from './brew';
+import { weightedEbcFromRefs } from './derived';
 import { nowIso } from './uuid';
 
 /** 配方实绩档案 */
@@ -19,7 +21,11 @@ export interface RecipeArchive {
   schemaVersion: number;
   exportedAt: string;
   recipe: Recipe;
+  /** 本配方引用到的麦芽主档 */
   malts: Malt[];
+  /** 本配方的麦芽投料行（含色度快照与待重算标记） */
+  recipeMalts: RecipeMalt[];
+  /** 本配方引用到的酒花主档 */
   hops: Hop[];
   mashSteps: MashStep[];
   boilAdds: BoilAdd[];
@@ -51,18 +57,23 @@ function stripRevision<T extends WithRevision>(row: T): T {
   return copy as T;
 }
 
-/** 汇总某个配方的实绩档案 */
+/** 汇总某个配方的实绩档案（主档只导出被该配方引用到的部分） */
 export async function buildRecipeArchive(recipeId: string): Promise<RecipeArchive> {
   const recipe = await db.recipes.get(recipeId);
   if (!recipe) throw new Error('配方不存在，无法导出档案');
-  const [malts, hops, mashSteps, boilAdds, ferments, packagings] = await Promise.all([
-    db.malts.where('recipeId').equals(recipeId).toArray(),
-    db.hops.where('recipeId').equals(recipeId).toArray(),
+  const [recipeMalts, allMalts, mashSteps, boilAdds, ferments, packagings] = await Promise.all([
+    db.recipeMalts.where('recipeId').equals(recipeId).toArray(),
+    db.malts.toArray(),
     db.mashSteps.where('recipeId').equals(recipeId).toArray(),
     db.boilAdds.where('recipeId').equals(recipeId).toArray(),
     db.ferments.where('recipeId').equals(recipeId).toArray(),
     db.packagings.where('recipeId').equals(recipeId).toArray()
   ]);
+  const allHops = await db.hops.toArray();
+  const maltIds = new Set(recipeMalts.map((item) => item.maltId));
+  const hopIds = new Set(boilAdds.map((item) => item.hopId).filter((id): id is string => id !== null));
+  const malts = allMalts.filter((item) => maltIds.has(item.id));
+  const hops = allHops.filter((item) => hopIds.has(item.id));
   const sortedFerments = [...ferments].sort((a, b) => a.date.localeCompare(b.date));
   const og = sortedFerments.length > 0 ? sortedFerments[0].gravity : recipe.targetOg;
   const fg = sortedFerments.length > 0 ? sortedFerments[sortedFerments.length - 1].gravity : recipe.targetFg;
@@ -73,19 +84,20 @@ export async function buildRecipeArchive(recipeId: string): Promise<RecipeArchiv
     exportedAt: nowIso(),
     recipe: stripRevision(recipe),
     malts: malts.map(stripRevision),
+    recipeMalts: recipeMalts.map(stripRevision),
     hops: hops.map(stripRevision),
     mashSteps: mashSteps.map(stripRevision),
     boilAdds: boilAdds.map(stripRevision),
     ferments: sortedFerments.map(stripRevision),
     packagings: packagings.map(stripRevision),
     summary: {
-      maltCount: malts.length,
+      maltCount: recipeMalts.length,
       hopCount: hops.length,
       mashStepCount: mashSteps.length,
       boilAddCount: boilAdds.length,
       fermentCount: ferments.length,
       grainKg: totalGrainKg(recipe.batchSizeL, recipe.targetOg),
-      avgEbc: weightedEbc(malts),
+      avgEbc: weightedEbcFromRefs(recipeMalts.map((item) => ({ ebcSnapshot: item.ebcSnapshot, ratioPct: item.ratioPct }))),
       og,
       fg,
       abv: abvFromGravity(og, fg),

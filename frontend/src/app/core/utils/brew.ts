@@ -54,18 +54,6 @@ export function maltAmountKg(totalKg: number, ratioPct: number): number {
   return Number(((totalKg * ratioPct) / 100).toFixed(2));
 }
 
-/** 配方加权平均色度 EBC */
-export function weightedEbc(malts: Array<{ ebc: number; ratioPct: number }>): number {
-  const totalRatio = malts.reduce((sum, item) => sum + item.ratioPct, 0);
-  if (totalRatio === 0) return 0;
-  return Number((malts.reduce((sum, item) => sum + item.ebc * item.ratioPct, 0) / totalRatio).toFixed(1));
-}
-
-/** 色度偏差（实算 - 目标） */
-export function ebcDeviation(malts: Array<{ ebc: number; ratioPct: number }>, targetEbc: number): number {
-  return Number((weightedEbc(malts) - targetEbc).toFixed(1));
-}
-
 /**
  * Tinseth 简化版 IBU 估算
  * @param alphaPct α 酸百分比

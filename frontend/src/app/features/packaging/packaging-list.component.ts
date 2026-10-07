@@ -229,12 +229,14 @@ import { abvFromGravity } from '../../core/utils/brew';
                   <td>v{{ schemaVersion }}</td>
                 </tr>
                 <tr>
-                  <th>配方 / 麦芽 / 酒花</th>
+                  <th>配方 / 麦芽主档 / 酒花主档</th>
                   <td>{{ counts['recipes'] || 0 }} / {{ counts['malts'] || 0 }} / {{ counts['hops'] || 0 }}</td>
                 </tr>
                 <tr>
-                  <th>糖化步 / 煮沸投加</th>
-                  <td>{{ counts['mashSteps'] || 0 }} / {{ counts['boilAdds'] || 0 }}</td>
+                  <th>配方麦芽投料 / 糖化步 / 煮沸投加</th>
+                  <td>
+                    {{ counts['recipeMalts'] || 0 }} / {{ counts['mashSteps'] || 0 }} / {{ counts['boilAdds'] || 0 }}
+                  </td>
                 </tr>
                 <tr>
                   <th>发酵读数 / 罐装批次</th>
