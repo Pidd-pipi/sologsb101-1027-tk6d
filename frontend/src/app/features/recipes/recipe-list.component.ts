@@ -25,10 +25,18 @@ import {
   selectRecipeLoading,
   selectSelectedRecipe
 } from '../../core/state/recipe/recipe.selectors';
-import { selectAllMalts } from '../../core/state/ingredients/ingredients.selectors';
 import { selectAllFerments } from '../../core/state/ferment/ferment.selectors';
 import { selectAllPackagings } from '../../core/state/packaging/packaging.selectors';
+import {
+  selectAllBoilAdds,
+} from '../../core/state/boil/boil.selectors';
+import {
+  selectAllHopUsages,
+  selectAllRecipeMalts,
+  selectResolvedRecipeMalts
+} from '../../core/state/ingredients/ingredients.selectors';
 import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from '../../core/utils/brew';
+import type { RecipeRow } from '../../core/utils/db';
 
 @Component({
   selector: 'app-recipe-list',
@@ -101,6 +109,12 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
                 <mat-card-subtitle>
                   <app-style-tag [value]="recipe.style"></app-style-tag>
                   <span class="muted">批次 {{ recipe.batchSizeL }} L</span>
+                  @if (ebcStale(recipe.id)) {
+                    <span class="stale-flag">色度待重算</span>
+                  }
+                  @if (ibuStale(recipe.id)) {
+                    <span class="stale-flag">煮沸苦度待重算</span>
+                  }
                 </mat-card-subtitle>
               </mat-card-header>
               <mat-card-content>
@@ -124,9 +138,15 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
                     </tr>
                     <tr>
                       <th>色度偏差</th>
-                      <td [style.color]="ebcDelta(recipe) < 0 ? '#c0392b' : '#1e8449'">
-                        {{ ebcDelta(recipe) > 0 ? '+' : '' }}{{ ebcDelta(recipe) }} EBC
-                      </td>
+                      @if (ebcStale(recipe.id)) {
+                        <td>
+                          <span class="stale-flag">旧值作废 · 待重算</span>
+                        </td>
+                      } @else {
+                        <td [style.color]="ebcDelta(recipe) < 0 ? '#c0392b' : '#1e8449'">
+                          {{ ebcDelta(recipe) > 0 ? '+' : '' }}{{ ebcDelta(recipe) }} EBC
+                        </td>
+                      }
                     </tr>
                     <tr>
                       <th>投料量</th>
@@ -193,7 +213,21 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
         </mat-card>
       }
     </div>
-  `
+  `,
+  styles: [
+    `
+      .stale-flag {
+        display: inline-block;
+        margin-left: 6px;
+        background: #d68910;
+        color: #fff;
+        border-radius: 999px;
+        padding: 1px 8px;
+        font-size: 11px;
+        white-space: nowrap;
+      }
+    `
+  ]
 })
 export class RecipeListComponent implements OnInit {
   private readonly store = inject(Store);
@@ -208,7 +242,10 @@ export class RecipeListComponent implements OnInit {
   readonly loading = this.store.selectSignal(selectRecipeLoading);
   readonly error = this.store.selectSignal(selectRecipeError);
 
-  private readonly allMalts = this.store.selectSignal(selectAllMalts);
+  private readonly resolvedMalts = this.store.selectSignal(selectResolvedRecipeMalts);
+  private readonly allRecipeMalts = this.store.selectSignal(selectAllRecipeMalts);
+  private readonly allHopUsages = this.store.selectSignal(selectAllHopUsages);
+  private readonly allBoilAdds = this.store.selectSignal(selectAllBoilAdds);
   private readonly allFerments = this.store.selectSignal(selectAllFerments);
   private readonly allPackagings = this.store.selectSignal(selectAllPackagings);
 
@@ -272,15 +309,30 @@ export class RecipeListComponent implements OnInit {
   }
 
   maltCount(recipeId: string): number {
-    return this.allMalts().filter((item) => item.recipeId === recipeId).length;
+    return this.allRecipeMalts().filter((item) => item.recipeId === recipeId).length;
   }
 
   grainKg(recipe: Recipe): number {
     return totalGrainKg(recipe.batchSizeL, recipe.targetOg);
   }
 
-  ebcDelta(recipe: Recipe): number {
-    const malts = this.allMalts().filter((item) => item.recipeId === recipe.id);
+  /** 主档色度已改但配方尚未重算：色度偏差作废，卡片上标出来 */
+  ebcStale(recipeId: string): boolean {
+    return this.resolvedMalts().some((item) => item.recipeId === recipeId && (item.stale || item.missing));
+  }
+
+  /** 主档 α 酸已改但投花 / 配方酒花尚未重算：煮沸苦度作废 */
+  ibuStale(recipeId: string): boolean {
+    return (
+      this.allHopUsages().some((item) => item.recipeId === recipeId && item.stale === true) ||
+      this.allBoilAdds().some((item) => item.recipeId === recipeId && (item.stale === true || item.hopId === null))
+    );
+  }
+
+  ebcDelta(recipe: RecipeRow): number {
+    const malts = this.resolvedMalts()
+      .filter((item) => item.recipeId === recipe.id && item.ebc !== null)
+      .map((item) => ({ ebc: item.ebc as number, ratioPct: item.ratioPct }));
     if (malts.length === 0) return 0;
     return ebcDeviation(malts, recipe.targetEbc);
   }

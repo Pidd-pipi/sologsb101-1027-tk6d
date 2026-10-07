@@ -1,11 +1,13 @@
 /**
  * 配方 feature effects：把 NgRx actions 转成 Dexie 读写。
- * 所有变更动作完成后统一广播 Reload All，保证跨表数据一致。
+ * 所有变更动作完成后统一广播 Reload All，保证跨表数据一致；
+ * 服务层拦截（如主档仍被引用）转 Mutation Rejected，由通知 effect 弹条提示。
  */
 import { Injectable, inject } from '@angular/core';
 import { Actions, createEffect, ofType } from '@ngrx/effects';
 import type { Action } from '@ngrx/store';
 import { catchError, exhaustMap, forkJoin, from, map, of, switchMap } from 'rxjs';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { RecipeService } from '../../services/recipe.service';
 import { IngredientsActions } from '../ingredients/ingredients.actions';
 import { MashActions } from '../mash/mash.actions';
@@ -16,6 +18,7 @@ import { RecipeActions } from './recipe.actions';
 export class RecipeEffects {
   private readonly actions$ = inject(Actions);
   private readonly service = inject(RecipeService);
+  private readonly snack = inject(MatSnackBar);
 
   /** 一次性加载配方主表 + 全部从属表 */
   reloadAll$ = createEffect(() =>
@@ -24,14 +27,21 @@ export class RecipeEffects {
       switchMap(() =>
         forkJoin({
           recipes: from(this.service.listRecipes()),
-          malts: from(this.service.listMalts()),
-          hops: from(this.service.listHops()),
+          maltCatalog: from(this.service.listMaltCatalog()),
+          hopCatalog: from(this.service.listHopCatalog()),
+          recipeMalts: from(this.service.listRecipeMalts()),
+          hopUsages: from(this.service.listHopUsages()),
           mashSteps: from(this.service.listMashSteps()),
           boilAdds: from(this.service.listBoilAdds())
         }).pipe(
           switchMap((data) => [
             RecipeActions.loadRecipesSuccess({ recipes: data.recipes }),
-            IngredientsActions.loadIngredientsSuccess({ malts: data.malts, hops: data.hops }),
+            IngredientsActions.loadIngredientsSuccess({
+              maltCatalog: data.maltCatalog,
+              hopCatalog: data.hopCatalog,
+              recipeMalts: data.recipeMalts,
+              hopUsages: data.hopUsages
+            }),
             MashActions.loadMashStepsSuccess({ steps: data.mashSteps }),
             BoilActions.loadBoilAddsSuccess({ adds: data.boilAdds })
           ]),
@@ -41,6 +51,16 @@ export class RecipeEffects {
         )
       )
     )
+  );
+
+  /** 变更被服务层拦下：弹条提示，不污染错误页 */
+  rejected$ = createEffect(
+    () =>
+      this.actions$.pipe(
+        ofType(RecipeActions.mutationRejected),
+        switchMap(({ error }) => this.snack.open(error, '关闭', { duration: 3200 }).afterDismissed())
+      ),
+    { dispatch: false }
   );
 
   /** 配方增删改 */
@@ -61,36 +81,46 @@ export class RecipeEffects {
         return from(task()).pipe(
           map(() => RecipeActions.reloadAll()),
           catchError((error: unknown) =>
-            of(RecipeActions.loadFailure({ error: error instanceof Error ? error.message : '保存失败' }))
+            of(RecipeActions.mutationRejected({ error: error instanceof Error ? error.message : '保存失败' }))
           )
         );
       })
     )
   );
 
-  /** 麦芽 / 酒花 / 糖化步 / 煮沸投加的增删改 */
+  /** 主档 / 配方用料 / 糖化步 / 煮沸投加的增删改与标脏处理 */
   ingredientMutation$ = createEffect(() =>
     this.actions$.pipe(
       ofType(
-        IngredientsActions.createMalt,
-        IngredientsActions.updateMalt,
-        IngredientsActions.deleteMalt,
-        IngredientsActions.createHop,
-        IngredientsActions.updateHop,
-        IngredientsActions.deleteHop,
+        IngredientsActions.createMaltCatalog,
+        IngredientsActions.updateMaltCatalog,
+        IngredientsActions.deleteMaltCatalog,
+        IngredientsActions.createRecipeMalt,
+        IngredientsActions.updateRecipeMalt,
+        IngredientsActions.deleteRecipeMalt,
+        IngredientsActions.markRecipeMaltFresh,
+        IngredientsActions.createHopCatalog,
+        IngredientsActions.updateHopCatalog,
+        IngredientsActions.deleteHopCatalog,
+        IngredientsActions.createHopUsage,
+        IngredientsActions.updateHopUsage,
+        IngredientsActions.deleteHopUsage,
+        IngredientsActions.markHopUsageFresh,
         MashActions.createMashStep,
         MashActions.updateMashStep,
         MashActions.deleteMashStep,
         MashActions.reorderMashSteps,
         BoilActions.createBoilAdd,
         BoilActions.updateBoilAdd,
-        BoilActions.deleteBoilAdd
+        BoilActions.deleteBoilAdd,
+        BoilActions.linkBoilAddHop,
+        BoilActions.markBoilAddFresh
       ),
       exhaustMap((action) =>
         from(this.persistIngredient(action)).pipe(
           map(() => RecipeActions.reloadAll()),
           catchError((error: unknown) =>
-            of(RecipeActions.loadFailure({ error: error instanceof Error ? error.message : '保存失败' }))
+            of(RecipeActions.mutationRejected({ error: error instanceof Error ? error.message : '保存失败' }))
           )
         )
       )
@@ -100,18 +130,34 @@ export class RecipeEffects {
   private persistIngredient(action: Action): Promise<unknown> {
     const payload = action as unknown as Record<string, unknown>;
     switch (action.type) {
-      case IngredientsActions.createMalt.type:
-        return this.service.createMalt(payload['payload'] as never);
-      case IngredientsActions.updateMalt.type:
-        return this.service.updateMalt(payload['id'] as string, payload['patch'] as never);
-      case IngredientsActions.deleteMalt.type:
-        return this.service.deleteMalt(payload['id'] as string);
-      case IngredientsActions.createHop.type:
-        return this.service.createHop(payload['payload'] as never);
-      case IngredientsActions.updateHop.type:
-        return this.service.updateHop(payload['id'] as string, payload['patch'] as never);
-      case IngredientsActions.deleteHop.type:
-        return this.service.deleteHop(payload['id'] as string);
+      case IngredientsActions.createMaltCatalog.type:
+        return this.service.createMaltCatalog(payload['payload'] as never);
+      case IngredientsActions.updateMaltCatalog.type:
+        return this.service.updateMaltCatalog(payload['id'] as string, payload['patch'] as never);
+      case IngredientsActions.deleteMaltCatalog.type:
+        return this.service.deleteMaltCatalog(payload['id'] as string);
+      case IngredientsActions.createRecipeMalt.type:
+        return this.service.createRecipeMalt(payload['payload'] as never);
+      case IngredientsActions.updateRecipeMalt.type:
+        return this.service.updateRecipeMalt(payload['id'] as string, payload['patch'] as never);
+      case IngredientsActions.deleteRecipeMalt.type:
+        return this.service.deleteRecipeMalt(payload['id'] as string);
+      case IngredientsActions.markRecipeMaltFresh.type:
+        return this.service.markRecipeMaltFresh(payload['id'] as string);
+      case IngredientsActions.createHopCatalog.type:
+        return this.service.createHopCatalog(payload['payload'] as never);
+      case IngredientsActions.updateHopCatalog.type:
+        return this.service.updateHopCatalog(payload['id'] as string, payload['patch'] as never);
+      case IngredientsActions.deleteHopCatalog.type:
+        return this.service.deleteHopCatalog(payload['id'] as string);
+      case IngredientsActions.createHopUsage.type:
+        return this.service.createHopUsage(payload['payload'] as never);
+      case IngredientsActions.updateHopUsage.type:
+        return this.service.updateHopUsage(payload['id'] as string, payload['patch'] as never);
+      case IngredientsActions.deleteHopUsage.type:
+        return this.service.deleteHopUsage(payload['id'] as string);
+      case IngredientsActions.markHopUsageFresh.type:
+        return this.service.markHopUsageFresh(payload['id'] as string);
       case MashActions.createMashStep.type:
         return this.service.createMashStep(payload['payload'] as never);
       case MashActions.updateMashStep.type:
@@ -124,6 +170,10 @@ export class RecipeEffects {
         return this.service.createBoilAdd(payload['payload'] as never);
       case BoilActions.updateBoilAdd.type:
         return this.service.updateBoilAdd(payload['id'] as string, payload['patch'] as never);
+      case BoilActions.linkBoilAddHop.type:
+        return this.service.linkBoilAddHop(payload['id'] as string, payload['hopId'] as string);
+      case BoilActions.markBoilAddFresh.type:
+        return this.service.markBoilAddFresh(payload['id'] as string);
       default:
         return this.service.deleteBoilAdd(payload['id'] as string);
     }

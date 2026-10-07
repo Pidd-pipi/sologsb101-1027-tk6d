@@ -14,6 +14,8 @@ export const RecipeActions = createActionGroup({
     'Select Recipe': props<{ id: string | null }>(),
     'Set Filter': props<{ filter: FilterModel }>(),
     'Reset Filter': emptyProps(),
+    /** 增删改被服务层拦下（如主档仍被引用）：统一弹条提示，不落错误页 */
+    'Mutation Rejected': props<{ error: string }>(),
     'Create Recipe': props<{ payload: Omit<Recipe, 'id'> }>(),
     'Update Recipe': props<{ id: string; patch: Partial<Recipe> }>(),
     'Delete Recipe': props<{ id: string }>()

@@ -229,8 +229,12 @@ import { abvFromGravity } from '../../core/utils/brew';
                   <td>v{{ schemaVersion }}</td>
                 </tr>
                 <tr>
-                  <th>配方 / 麦芽 / 酒花</th>
-                  <td>{{ counts['recipes'] || 0 }} / {{ counts['malts'] || 0 }} / {{ counts['hops'] || 0 }}</td>
+                  <th>麦芽主档 / 配方麦芽</th>
+                  <td>{{ counts['maltCatalog'] || 0 }} / {{ counts['recipeMalts'] || 0 }}</td>
+                </tr>
+                <tr>
+                  <th>酒花主档 / 配方酒花</th>
+                  <td>{{ counts['hopCatalog'] || 0 }} / {{ counts['hopUsages'] || 0 }}</td>
                 </tr>
                 <tr>
                   <th>糖化步 / 煮沸投加</th>
@@ -474,8 +478,12 @@ export class PackagingListComponent implements OnInit {
     try {
       const parsed = parseArchive(this.importText);
       const snapshot = parsed as unknown as DatabaseSnapshot;
-      if (!Array.isArray((snapshot as unknown as { recipes?: unknown[] }).recipes)) {
+      const raw = snapshot as unknown as { recipes?: unknown[]; maltCatalog?: unknown[]; malts?: unknown[] };
+      if (!Array.isArray(raw.recipes)) {
         throw new Error('缺少 recipes 数组字段，不是本应用的备份文件');
+      }
+      if (!Array.isArray(raw.maltCatalog) && !Array.isArray(raw.malts)) {
+        throw new Error('缺少 maltCatalog（或旧版 malts）字段，不是本应用的备份文件');
       }
       await importSnapshot(snapshot);
       await this.refreshCounts();

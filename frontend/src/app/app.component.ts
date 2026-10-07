@@ -15,7 +15,7 @@ import { selectRecipeError } from './core/state/recipe/recipe.selectors';
 import { selectAllRecipes } from './core/state/recipe/recipe.selectors';
 import { selectAllFerments } from './core/state/ferment/ferment.selectors';
 import { selectAllPackagings } from './core/state/packaging/packaging.selectors';
-import { selectAllMalts, selectAllHops } from './core/state/ingredients/ingredients.selectors';
+import { selectAllMaltCatalog, selectAllHopCatalog } from './core/state/ingredients/ingredients.selectors';
 import { countAll, DB_NAME, DB_SCHEMA_VERSION, initDatabase } from './core/utils/db';
 
 @Component({
@@ -61,8 +61,8 @@ import { countAll, DB_NAME, DB_SCHEMA_VERSION, initDatabase } from './core/utils
 
         <div class="shell__foot">
           <div>本地库 {{ dbName }} · v{{ schemaVersion }}</div>
-          <div>配方 {{ recipeCount() }} · 麦芽 {{ maltCount() }} · 酒花 {{ hopCount() }}</div>
-          <div>发酵读数 {{ fermentCount() }} · 罐装 {{ packagingCount() }}</div>
+          <div>配方 {{ recipeCount() }} · 发酵读数 {{ fermentCount() }} · 罐装 {{ packagingCount() }}</div>
+          <div>麦芽主档 {{ maltCount() }} · 酒花主档 {{ hopCount() }}</div>
           <div>{{ dbReady() ? '本地库已就绪' : '正在打开本地库…' }}</div>
         </div>
       </mat-sidenav>
@@ -163,8 +163,8 @@ export class AppComponent implements OnInit {
   readonly dbReady = signal(false);
   readonly error = this.store.selectSignal(selectRecipeError);
   readonly recipeCount = computed(() => this.store.selectSignal(selectAllRecipes)());
-  readonly maltCount = computed(() => this.store.selectSignal(selectAllMalts)());
-  readonly hopCount = computed(() => this.store.selectSignal(selectAllHops)());
+  readonly maltCount = computed(() => this.store.selectSignal(selectAllMaltCatalog)().length);
+  readonly hopCount = computed(() => this.store.selectSignal(selectAllHopCatalog)().length);
   readonly fermentCount = computed(() => this.store.selectSignal(selectAllFerments)());
   readonly packagingCount = computed(() => this.store.selectSignal(selectAllPackagings)());
 

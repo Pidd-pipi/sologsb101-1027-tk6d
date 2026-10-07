@@ -65,10 +65,10 @@ npm run build      # ng build，产物在 frontend/dist/gbbrewhouse/browser
 
 | 路由 | 模块 | 消费模型 | 主要交互 |
 | --- | --- | --- | --- |
-| `/recipes` | 配方与风格台账 | Recipe、Ferment、Malt、Packaging | 新建/编辑/删除配方（级联删除确认）、按风格筛选、实时回算实绩 OG/FG、ABV、发酵度与色度偏差、筛选同步 URL query |
-| `/ingredients` | 麦芽与酒花辅料库 | Malt、Hop、Recipe | 按色度、α 酸、产地筛选，调整配比后自动重算加权平均色度与总投料量，麦芽色度色块预览 |
+| `/recipes` | 配方与风格台账 | Recipe、RecipeMalt、HopUsage、BoilAdd、Ferment、Packaging | 新建/编辑/删除配方（级联删除确认）、按风格筛选、实时回算实绩 OG/FG、ABV、发酵度；主档色度/α 酸改动未重算时把「色度待重算 / 煮沸苦度待重算」标在卡片上 |
+| `/ingredients` | 麦芽与酒花辅料库 | MaltCatalog、HopCatalog、RecipeMalt、HopUsage、Recipe | 主档（色度 / α 酸唯一出处）与配方用量分四张表；按色度、α 酸、产地筛选；主档一改，引用它的配方用料立即标「待重算」，旧偏差/旧苦度作废；删除主档时被引用会拦下并提示 |
 | `/mash` | 糖化升温步编排与洗糟 | MashStep、Recipe | **Angular CDK 拖拽调序**（含上下移按钮）、逐条签署完成、进度与总水量统计 |
-| `/boil` | 煮沸投花时间表 | BoilAdd、Hop、Recipe | 按投加时点倒计时排序、**高亮下一投加点**、按 α 酸估算 IBU 并与目标 IBU 比对 |
+| `/boil` | 煮沸投花时间表 | BoilAdd、HopCatalog、Recipe | 按投加时点倒计时排序、**高亮下一投加点**、按主档 α 酸估算 IBU；投花认主档 id 而非名字，旧数据认不出的投加列入「待指认」由人认领；α 酸改动期间苦度与 IBU 偏差显示待重算 |
 | `/ferment` | 发酵比重与双乙酰还原 | Ferment、Recipe | 批次切换、逐日录入比重/温度/双乙酰、**趋势条（超温标红）**、双乙酰低于阈值提示还原完成、停滞判定 |
 | `/packaging` | 罐装批次登记与结构版本导出 | Packaging 及全部模型 | 由发酵读数自动带出 OG/FG 与 ABV、配方实绩档案导出、本地库版本查看与整库 JSON 导入导出 |
 
@@ -106,9 +106,13 @@ sologsb101-1027/
 
 ## 六、数据存储说明
 
-- **IndexedDB 库名**：`gbbrewhouse-db`（Dexie 封装），结构版本号 `version(1)`，并带 `upgrade()` 迁移逻辑（为历史行补齐行修订号与时间戳）。
-- **分表存储**：`recipes` 配方、`malts` 麦芽、`hops` 酒花、`mashSteps` 糖化步、`boilAdds` 煮沸投加、`ferments` 发酵读数、`packagings` 罐装批次，共 7 张表；每行带 `revision` / `createdAt` / `updatedAt`。
+- **IndexedDB 库名**：`gbbrewhouse-db`（Dexie 封装），结构版本号 `version(2)`，每级版本都带 `upgrade()` 迁移逻辑（v1 补齐行修订号与时间戳；v2 拆分辅料主档 / 配方用料并把投花改认主档）。
+- **分表存储**：`recipes` 配方、`maltCatalog` 麦芽主档、`hopCatalog` 酒花主档、`recipeMalts` 配方麦芽用量、`hopUsages` 配方酒花用量、`mashSteps` 糖化步、`boilAdds` 煮沸投加、`ferments` 发酵读数、`packagings` 罐装批次，共 9 张表；每行带 `revision` / `createdAt` / `updatedAt`。
+- **主档为唯一出处**：色度（EBC）只存在麦芽主档、α 酸只存在酒花主档；配方用量行与投花只记主档 id 和用量。主档色度 / α 酸一改，引用它的用量行与投花全部置 `stale`，页面即时标出「待重算」，旧色度偏差 / 煮沸苦度作废，确认重算后摘标。
+- **投花认主档**：`boilAdds.hopId` 指向酒花主档；v1 旧数据升级时按名字回填，名字认不到主档的 `hopId` 留 `null`，在煮沸页「待指认」区列出由人选择主档（澄清类辅料始终为 `null`）。
+- **删除拦截**：麦芽 / 酒花主档仍被配方用量或投花引用时禁止删除，由服务层抛 `ReferenceBlockedError`、页面弹条提示，先移除/更换引用再删。
 - **首屏自动播种**：`core/utils/db.ts` 的 `initDatabase()` 在 `recipes` 表为空时调用 `seedDatabase()`，灌入互相引用的三层演示数据（配方 → 麦芽/酒花/糖化步/煮沸投加 → 发酵读数 → 罐装批次），保证 6 个页面首次打开都有内容；播种幂等。
 - **状态流**：页面只 `dispatch` NgRx actions 并 `select` 状态流，所有读写最终由 `core/services/recipe.service.ts` → `IdbTableService` → Dexie 落库，跨页状态不留在组件字段。
 - **无后端**：没有 API 服务、没有数据库容器；容器本身无状态，不挂载任何卷。
-- **级联规则**：删除配方会级联删除其麦芽、酒花、糖化步、煮沸投加、发酵读数与罐装批次。
+- **级联规则**：删除配方会级联删除其配方麦芽、配方酒花、糖化步、煮沸投加、发酵读数与罐装批次；只被该配方引用的主档随之一并清理，仍被其它配方引用的主档保留。
+- **备份兼容**：整库 JSON 导入与结构升级共用同一套 v1→v2 归一逻辑（按名字归并主档、投花按名字回填 hopId），旧版备份可直接导入。

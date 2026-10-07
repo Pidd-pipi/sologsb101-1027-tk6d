@@ -1,11 +1,16 @@
 /**
- * RecipeService：配方及其从属数据（麦芽 / 酒花 / 糖化步 / 煮沸投加 / 发酵 / 罐装）的读写收口。
+ * RecipeService：配方、辅料主档 / 配方用料及其他从属数据的读写收口。
  * 全部读写走 IdbTableService → Dexie → IndexedDB。
+ *
+ * 引用规则：
+ * - 麦芽 / 酒花主档是色度 / α 酸的唯一出处；主档这些值一改，引用它的配方用料与投花全部置 stale，旧偏差作废。
+ * - 删除主档时若仍被配方用料或投花引用，抛 ReferenceBlockedError 拦下来。
+ * - 煮沸投花认酒花主档 hopId，不再照名字认。
  */
 import { Injectable, inject } from '@angular/core';
 import type { Recipe } from '../models/recipe.model';
-import type { Malt } from '../models/malt.model';
-import type { Hop } from '../models/hop.model';
+import type { MaltCatalog, RecipeMalt } from '../models/malt.model';
+import type { HopCatalog, HopUsage } from '../models/hop.model';
 import type { MashStep } from '../models/mash-step.model';
 import type { BoilAdd } from '../models/boil-add.model';
 import type { Ferment } from '../models/ferment.model';
@@ -13,13 +18,16 @@ import type { Packaging } from '../models/packaging.model';
 import {
   db,
   removeRecipe,
+  ReferenceBlockedError,
   ROW_REVISION,
   type BoilAddRow,
   type FermentRow,
-  type HopRow,
-  type MaltRow,
+  type HopCatalogRow,
+  type HopUsageRow,
+  type MaltCatalogRow,
   type MashStepRow,
   type PackagingRow,
+  type RecipeMaltRow,
   type RecipeRow
 } from '../utils/db';
 import { createId } from '../utils/uuid';
@@ -49,44 +57,143 @@ export class RecipeService {
     return removeRecipe(id);
   }
 
-  /* ------------------------------ 麦芽 ------------------------------ */
+  /* ---------------------------- 麦芽主档 ---------------------------- */
 
-  listMalts(): Promise<MaltRow[]> {
-    return db.malts.toArray();
+  listMaltCatalog(): Promise<MaltCatalogRow[]> {
+    return db.maltCatalog.toArray();
   }
 
-  async createMalt(payload: Omit<Malt, 'id'>): Promise<string> {
-    const row = { ...payload, id: createId('malt'), revision: ROW_REVISION, createdAt: Date.now(), updatedAt: Date.now() };
-    await db.malts.put(row);
+  async createMaltCatalog(payload: Omit<MaltCatalog, 'id'>): Promise<string> {
+    const row = this.idb.buildRow(payload, 'mcat') as MaltCatalogRow;
+    await db.maltCatalog.put(row);
     return row.id;
   }
 
-  updateMalt(id: string, patch: Partial<Malt>): Promise<void> {
-    return this.idb.update(db.malts, id, patch);
+  /** 改色度：引用该主档的配方麦芽全部标 stale，旧色度偏差作废重算 */
+  async updateMaltCatalog(id: string, patch: Partial<MaltCatalog>): Promise<void> {
+    await db.transaction('rw', [db.maltCatalog, db.recipeMalts], async () => {
+      if (patch.ebc !== undefined) {
+        const current = await db.maltCatalog.get(id);
+        if (current && current.ebc !== patch.ebc) {
+          await db.recipeMalts.where('maltId').equals(id).modify({ stale: true, updatedAt: Date.now() } as never);
+        }
+      }
+      await this.idb.update(db.maltCatalog, id, patch);
+    });
   }
 
-  deleteMalt(id: string): Promise<void> {
-    return this.idb.remove(db.malts, id);
+  /** 仍被配方麦芽引用时禁止删除 */
+  async deleteMaltCatalog(id: string): Promise<void> {
+    const refCount = await db.recipeMalts.where('maltId').equals(id).count();
+    if (refCount > 0) {
+      throw new ReferenceBlockedError(`该麦芽仍被 ${refCount} 条配方用料引用，请先移除或更换配方中的麦芽`);
+    }
+    await this.idb.remove(db.maltCatalog, id);
   }
 
-  /* ------------------------------ 酒花 ------------------------------ */
+  /* ---------------------------- 酒花主档 ---------------------------- */
 
-  listHops(): Promise<HopRow[]> {
-    return db.hops.toArray();
+  listHopCatalog(): Promise<HopCatalogRow[]> {
+    return db.hopCatalog.toArray();
   }
 
-  async createHop(payload: Omit<Hop, 'id'>): Promise<string> {
-    const row = { ...payload, id: createId('hop'), revision: ROW_REVISION, createdAt: Date.now(), updatedAt: Date.now() };
-    await db.hops.put(row);
+  async createHopCatalog(payload: Omit<HopCatalog, 'id'>): Promise<string> {
+    const row = this.idb.buildRow(payload, 'hcat') as HopCatalogRow;
+    await db.hopCatalog.put(row);
     return row.id;
   }
 
-  updateHop(id: string, patch: Partial<Hop>): Promise<void> {
-    return this.idb.update(db.hops, id, patch);
+  /** 改 α 酸：引用该主档的配方酒花与煮沸投花全部标 stale，旧煮沸苦度作废重算 */
+  async updateHopCatalog(id: string, patch: Partial<HopCatalog>): Promise<void> {
+    await db.transaction('rw', [db.hopCatalog, db.hopUsages, db.boilAdds], async () => {
+      if (patch.alphaPct !== undefined) {
+        const current = await db.hopCatalog.get(id);
+        if (current && current.alphaPct !== patch.alphaPct) {
+          const now = Date.now();
+          await db.hopUsages.where('hopId').equals(id).modify({ stale: true, updatedAt: now } as never);
+          await db.boilAdds.where('hopId').equals(id).modify({ stale: true, updatedAt: now } as never);
+        }
+      }
+      await this.idb.update(db.hopCatalog, id, patch);
+    });
   }
 
-  deleteHop(id: string): Promise<void> {
-    return this.idb.remove(db.hops, id);
+  /** 仍被配方酒花或煮沸投花引用时禁止删除 */
+  async deleteHopCatalog(id: string): Promise<void> {
+    const [usageCount, boilCount] = await Promise.all([
+      db.hopUsages.where('hopId').equals(id).count(),
+      db.boilAdds.where('hopId').equals(id).count()
+    ]);
+    if (usageCount + boilCount > 0) {
+      throw new ReferenceBlockedError(
+        `该酒花仍被 ${usageCount} 条配方用料、${boilCount} 条煮沸投加引用，请先移除或更换引用后再删除`
+      );
+    }
+    await this.idb.remove(db.hopCatalog, id);
+  }
+
+  /* ---------------------------- 配方麦芽 ---------------------------- */
+
+  listRecipeMalts(): Promise<RecipeMaltRow[]> {
+    return db.recipeMalts.toArray();
+  }
+
+  async createRecipeMalt(payload: Omit<RecipeMalt, 'id'>): Promise<string> {
+    const row = {
+      ...payload,
+      stale: payload.stale ?? false,
+      id: createId('rmalt'),
+      revision: ROW_REVISION,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    await db.recipeMalts.put(row);
+    return row.id;
+  }
+
+  updateRecipeMalt(id: string, patch: Partial<RecipeMalt>): Promise<void> {
+    return this.idb.update(db.recipeMalts, id, patch);
+  }
+
+  deleteRecipeMalt(id: string): Promise<void> {
+    return this.idb.remove(db.recipeMalts, id);
+  }
+
+  /** 色度已按主档新值重算确认：摘掉该配方麦芽的 stale 标记 */
+  markRecipeMaltFresh(id: string): Promise<void> {
+    return this.idb.update(db.recipeMalts, id, { stale: false });
+  }
+
+  /* ---------------------------- 配方酒花 ---------------------------- */
+
+  listHopUsages(): Promise<HopUsageRow[]> {
+    return db.hopUsages.toArray();
+  }
+
+  async createHopUsage(payload: Omit<HopUsage, 'id'>): Promise<string> {
+    const row = {
+      ...payload,
+      stale: payload.stale ?? false,
+      id: createId('huse'),
+      revision: ROW_REVISION,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    await db.hopUsages.put(row);
+    return row.id;
+  }
+
+  updateHopUsage(id: string, patch: Partial<HopUsage>): Promise<void> {
+    return this.idb.update(db.hopUsages, id, patch);
+  }
+
+  deleteHopUsage(id: string): Promise<void> {
+    return this.idb.remove(db.hopUsages, id);
+  }
+
+  /** α 酸已按主档新值重算确认：摘掉该配方酒花的 stale 标记 */
+  markHopUsageFresh(id: string): Promise<void> {
+    return this.idb.update(db.hopUsages, id, { stale: false });
   }
 
   /* ----------------------------- 糖化步 ----------------------------- */
@@ -134,7 +241,14 @@ export class RecipeService {
   }
 
   async createBoilAdd(payload: Omit<BoilAdd, 'id'>): Promise<string> {
-    const row = { ...payload, id: createId('boil'), revision: ROW_REVISION, createdAt: Date.now(), updatedAt: Date.now() };
+    const row = {
+      ...payload,
+      stale: payload.stale ?? false,
+      id: createId('boil'),
+      revision: ROW_REVISION,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
     await db.boilAdds.put(row);
     return row.id;
   }
@@ -145,6 +259,18 @@ export class RecipeService {
 
   deleteBoilAdd(id: string): Promise<void> {
     return this.idb.remove(db.boilAdds, id);
+  }
+
+  /** 人工把认不出主档的投加指认到酒花主档：落 hopId、同步物料名、摘掉 stale */
+  async linkBoilAddHop(id: string, hopId: string): Promise<void> {
+    const hop = await db.hopCatalog.get(hopId);
+    if (!hop) throw new ReferenceBlockedError('指认的酒花主档不存在');
+    await this.idb.update(db.boilAdds, id, { hopId, material: hop.name, stale: false });
+  }
+
+  /** 苦度已按主档新 α 酸重算确认：摘掉该投加的 stale 标记 */
+  markBoilAddFresh(id: string): Promise<void> {
+    return this.idb.update(db.boilAdds, id, { stale: false });
   }
 
   /* ---------------------------- 发酵读数 ---------------------------- */
